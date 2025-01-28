@@ -10,3 +10,7 @@ archives/pysube.py
 archives/pysubpl.py
 archives/pysubplus.py
 archives/subtitle_corrector.py
+piki.py
+temp_audio.wav
+PikiSubCreator2.py
+highlighted_subtitles.ass

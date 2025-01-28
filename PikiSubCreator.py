@@ -298,6 +298,8 @@ class VideoProcessor:
         except Exception as e:
             logger.error(f"Erreur lors de la récupération des métadonnées: {e}")
             return VideoMetadata(1920, 1080, 30.0)
+    
+
 
     def extract_audio(self, output_path: str) -> bool:
         """Extraction de l'audio de la vidéo"""
@@ -370,7 +372,7 @@ class SubtitleGenerator:
         subtitles = pysrt.SubRipFile()
 
         for i, segment in enumerate(segments):
-            start_time = pysrt.SubRipTime(seconds=segment["start"])
+            start_time = pysrt.SubRipTime(seconds=segment["start"] - 0.5)
             end_time = pysrt.SubRipTime(seconds=segment["end"])
             text = " ".join([word["word"] for word in segment["words"]])
 
@@ -386,7 +388,7 @@ class SubtitleGenerator:
         return subtitles
 
     def generate_ass_style(self, metadata: VideoMetadata) -> str:
-        """Génération du style ASS"""
+        """Génération du style ASS sans fond noir"""
         return f"""[Script Info]
 Title: Sous-titres stylisés
 ScriptType: v4.00+
@@ -397,7 +399,7 @@ PlayDepth: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: SubtitleFadeZoom,Arial,200,&HFFFFFF,&HFFFFFF,&H000000FF,&H000000A0,-1,0,0,0,100,100,0,0,3,0,0,2,0,0,0,1
+Style: SubtitleFadeZoom,Arial,170,&HFFFFFF,&HFFFFFF,&H000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,2,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -410,48 +412,106 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         secs = seconds % 60
         centiseconds = int((secs - int(secs)) * 100)
         return f"{hours}:{minutes:02}:{int(secs):02}.{centiseconds:02}"
+    
+    def get_metadata(self) -> VideoMetadata:
+        """Récupération des métadonnées de la vidéo"""
+        try:
+            cmd = [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height,r_frame_rate",
+                "-of", "csv=p=0",
+                self.video_path
+            ]
+            output = subprocess.check_output(cmd, universal_newlines=True)
+            width, height, fps_str = output.strip().split(',')
+            
+            # Calcul du fps à partir de la fraction (ex: 30000/1001)
+            num, den = map(int, fps_str.split('/'))
+            fps = num / den
+            
+            return VideoMetadata(int(width), int(height), fps)
+        except Exception as e:
+            logger.error(f"Erreur lors de la récupération des métadonnées: {e}")
+            return VideoMetadata(1920, 1080, 30.0)
 
     def convert_to_ass(self, subtitles: pysrt.SubRipFile, metadata: VideoMetadata) -> str:
-        """Conversion des sous-titres SRT en format ASS avec effets"""
-        logger.info("Conversion en format ASS...")
-        ass_file = "styled_subtitles.ass"
-        
-        # Écriture des styles ASS
+        """Conversion des sous-titres SRT en ASS avec fond rouge sur le mot prononcé,
+        limité à 4 mots maximum par phrase, sans fond noir."""
+        logger.info("Conversion en format ASS (effet sur le mot parlé)...")
+        ass_file = "highlighted_subtitles.ass"
+
+        metadata = self.get_metadata()
+        logger.info(f"Dimensions vidéo : {metadata.width}x{metadata.height}, FPS : {metadata.fps}")
+
+        # Générer les styles de base
         with open(ass_file, "w", encoding='utf-8') as f:
             f.write(self.generate_ass_style(metadata))
 
-        # Calcul des positions pour les effets
+        # Position des sous-titres
         center_x = metadata.width // 2
-        bottom_y = int(metadata.height * 0.67)
+        bottom_y = int(metadata.height * 0.9)
 
-        # Ajout des dialogues avec effets
         with open(ass_file, "a", encoding='utf-8') as f:
             for sub in subtitles:
+                # Diviser la phrase en groupes de 4 mots maximum
                 words = sub.text.split()
-                word_duration = (sub.end.ordinal - sub.start.ordinal) / len(words) / 1000.0
+                groups = [words[i:i+4] for i in range(0, len(words), 4)]
+                
+                total_duration = (sub.end.ordinal - sub.start.ordinal) / 1000.0
+                words_per_group = len(words)
+                word_duration = total_duration / words_per_group
 
-                for i, word in enumerate(words):
-                    word_start = sub.start.ordinal / 1000.0 + (i * word_duration)
-                    word_end = word_start + word_duration
+                # Traiter chaque groupe de mots
+                current_word_index = 0
+                for group in groups:
+                    for i, word in enumerate(group):
+                        start_time = self.format_ass_time(sub.start.ordinal / 1000.0 + current_word_index * word_duration)
+                        end_time = self.format_ass_time(sub.start.ordinal / 1000.0 + (current_word_index + 1) * word_duration)
 
-                    start_time = self.format_ass_time(max(0, word_start - 0.3))
-                    end_time = self.format_ass_time(word_end)
-
-                    if word.strip():
-                        effect = (
-                            f"\\an5"  # Alignement centré
-                            f"\\move({center_x},{bottom_y-400},{center_x},{bottom_y+50},0,300)"
-                            f"\\fad(200,200)"
-                            f"\\t(0,200,\\fscx100\\fscy100\\fs200)"
-                            f"\\3c&H0000FF&"
-                            f"\\1c&HFFFFFF&"
-                            f"\\bord2"
-                            f"\\xshad1\\yshad1"
+                        # Style pour les mots normaux (vraiment sans fond)
+                        base_style = (
+                            f"\\an2"  # Alignement centré en bas
+                            f"\\pos({center_x},{bottom_y})"
+                            f"\\1c&HFFFFFF&"  # Texte blanc
+                            f"\\3c&H000000&"  # Contour noir
+                            f"\\4a&HFF&"      # Ombre totalement transparente
+                            f"\\bord2"        # Contour fin
+                            f"\\shad0"        # Pas d'ombre
+                            f"\\fs170"        # Taille de police
                         )
-                        f.write(f"Dialogue: 0,{start_time},{end_time},SubtitleFadeZoom,,0,0,0,,{{{effect}}}{word}\n")
 
+                        # Style pour le mot en surbrillance (fond rouge)
+                        highlight_style = (
+                            f"\\an2"
+                            f"\\pos({center_x},{bottom_y})"
+                            f"\\1c&HFFFFFF&"  # Texte blanc
+                            f"\\3c&H0000FF&"  # Contour rouge
+                            f"\\4c&H0000FF&"  # Fond rouge
+                            f"\\4a&H00&"      # Fond opaque
+                            f"\\bord15"       # Large bordure pour créer le fond
+                            f"\\shad0"        # Pas d'ombre
+                            f"\\fs170"
+                        )
+
+                        # Construction du texte pour ce groupe
+                        text_parts = []
+                        for j, w in enumerate(group):
+                            if j == i:
+                                # Mot actuel avec fond rouge
+                                text_parts.append(f"{{{highlight_style}}}{w}")
+                            else:
+                                # Autres mots (vraiment sans fond)
+                                text_parts.append(f"{{{base_style}}}{w}")
+                        
+                        final_text = " ".join(text_parts)
+                        f.write(f"Dialogue: 0,{start_time},{end_time},SubtitleFadeZoom,,0,0,0,,{final_text}\n")
+                        current_word_index += 1
+
+        logger.info("Conversion en ASS terminée.")
         return ass_file
-
+        
     def run(self) -> bool:
         """Processus principal de génération des sous-titres"""
         try:
